@@ -1,38 +1,21 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
-from app.schemas import JobDetails, JobSummary
+from app.schemas import JobData, JobStatus
 
 router = APIRouter()
 
-JOBS: dict[str, JobDetails] = {
-    "job_001": JobDetails(
-        id="job_001",
-        filename="street-01.jpg",
-        status="completed",
-        redaction_faces=True,
-        redaction_plates=True,
-    ),
-    "job_002": JobDetails(
-        id="job_002",
-        filename="doc-scan.png",
-        status="processing",
-        redaction_faces=True,
-        redaction_plates=True,
-    ),
-}
 
-
-@router.get("/jobs", response_model=list[JobSummary], tags=["jobs"])
-def list_jobs() -> list[JobSummary]:
+@router.get("/jobs", response_model=list[JobData], tags=["jobs"])
+def list_jobs() -> list[JobData]:
     return [
-        JobSummary(id=job.id, filename=job.filename, status=job.status)
-        for job in JOBS.values()
     ]
 
 
-@router.get("/jobs/{job_id}", response_model=JobDetails, tags=["jobs"])
-def get_job(job_id: str) -> JobDetails:
-    job = JOBS.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
+@router.get("/jobs/{job_id}", response_model=JobData, tags=["jobs"])
+def get_job(job_id: str) -> JobData:
+    return JobData(
+        id=job_id,
+        name="name",
+        filename="file",
+        status="completed",
+    )
