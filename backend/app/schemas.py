@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel
@@ -13,4 +14,4 @@ class JobData(BaseModel):
     name: str
     filename: str
     status: JobStatus
-    created_at: str
+    created_at: datetime

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
+import os
+import time
 from typing import Final
 
-from app.schemas import JobData, SortBy, SortOrder
+from psycopg import connect
+from psycopg.rows import dict_row
 
-DB_PATH: Final = Path(__file__).resolve().parent / "jobs.db"
+from app.schemas import JobData, SortBy, SortOrder
 
 SORT_COLUMN_MAP: Final[dict[SortBy, str]] = {
     "created_at": "created_at",
@@ -29,32 +30,41 @@ SEED_JOBS: Final[list[tuple[str, str, str, str, str]]] = [
 ]
 
 
-def get_connection() -> sqlite3.Connection:
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
+def get_connection():
+    return connect(
+        host=os.getenv("POSTGRES_HOST", "localhost"),
+        port=int(os.getenv("POSTGRES_PORT", "5432")),
+        dbname=os.getenv("POSTGRES_DB", "redaction"),
+        user=os.getenv("POSTGRES_USER", "redaction"),
+        password=os.getenv("POSTGRES_PASSWORD", "redaction"),
+        row_factory=dict_row,
+    )
 
 
 def init_db() -> None:
-    with get_connection() as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                filename TEXT NOT NULL,
-                status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'completed', 'failed')),
-                created_at TEXT NOT NULL
-            )
-            """
-        )
+    last_error: Exception | None = None
 
-        job_count = connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-        if job_count == 0:
-            connection.executemany(
-                "INSERT INTO jobs (id, name, filename, status, created_at) VALUES (?, ?, ?, ?, ?)",
-                SEED_JOBS,
-            )
+    for _ in range(10):
+        try:
+            with get_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.executemany(
+                        """
+                        INSERT INTO jobs (id, name, filename, status, created_at)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (id) DO NOTHING
+                        """,
+                        SEED_JOBS,
+                    )
+
+                connection.commit()
+                return
+        except Exception as error:
+            last_error = error
+            time.sleep(1)
+
+    if last_error is not None:
+        raise last_error
 
 
 def list_jobs(sort_by: SortBy, sort_order: SortOrder) -> list[JobData]:
@@ -67,17 +77,21 @@ def list_jobs(sort_by: SortBy, sort_order: SortOrder) -> list[JobData]:
     """
 
     with get_connection() as connection:
-        rows = connection.execute(query).fetchall()
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
 
     return [JobData.model_validate(dict(row)) for row in rows]
 
 
 def get_job(job_id: str) -> JobData | None:
     with get_connection() as connection:
-        row = connection.execute(
-            "SELECT id, name, filename, status, created_at FROM jobs WHERE id = ?",
-            (job_id,),
-        ).fetchone()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, name, filename, status, created_at FROM jobs WHERE id = %s",
+                (job_id,),
+            )
+            row = cursor.fetchone()
 
     if row is None:
         return None

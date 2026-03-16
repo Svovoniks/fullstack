@@ -8,8 +8,5 @@ frontend/node_modules/
 frontend/dist/
 frontend/tsconfig.tsbuildinfo
 
-# Local app data
-backend/app/jobs.db
-
 # Env
 *.env
