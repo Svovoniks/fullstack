@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { useEffect, useState } from "react";
 import {
   Link,
@@ -10,6 +10,8 @@ import {
   useNavigate,
   useSearchParams,
 } from "react-router-dom";
+
+import { useAuth } from "./auth";
 
 type JobStatus = "queued" | "processing" | "completed" | "failed";
 type SortField = "created_at" | "id" | "name" | "status" | "filename";
@@ -34,6 +36,13 @@ type CreatedState = {
   fileCount: number;
 };
 
+type AuthLocationState = {
+  from?: {
+    pathname: string;
+    search: string;
+  };
+};
+
 const DEFAULT_SORT_FIELD: SortField = "created_at";
 const DEFAULT_SORT_ORDER: SortOrder = "desc";
 const SORTABLE_COLUMNS: { field: SortField; label: string }[] = [
@@ -44,7 +53,23 @@ const SORTABLE_COLUMNS: { field: SortField; label: string }[] = [
   { field: "status", label: "Status" },
 ];
 
+function AuthStatusBadge() {
+  const { status, session } = useAuth();
+
+  if (status === "loading") {
+    return <span className="auth-pill auth-pill--loading">Checking session</span>;
+  }
+
+  if (status === "authenticated" && session) {
+    return <span className="auth-pill auth-pill--ready">{session.username}</span>;
+  }
+
+  return <span className="auth-pill">Signed out</span>;
+}
+
 function AppShell({ title, children, actions }: AppShellProps) {
+  const { status, logout } = useAuth();
+
   return (
     <main className="app-root">
       <section className="screen-frame">
@@ -54,17 +79,25 @@ function AppShell({ title, children, actions }: AppShellProps) {
               <p className="screen-caption">personal data redaction</p>
               <h1>{title}</h1>
             </div>
-            <nav className="top-nav" aria-label="Primary">
-              <NavLink to="/" end className={({ isActive }) => (isActive ? "top-nav__link top-nav__link--active" : "top-nav__link")}>
-                Recent jobs
-              </NavLink>
-              <NavLink to="/jobs/new" className={({ isActive }) => (isActive ? "top-nav__link top-nav__link--active" : "top-nav__link")}>
-                New job
-              </NavLink>
-              <NavLink to="/results" className={({ isActive }) => (isActive ? "top-nav__link top-nav__link--active" : "top-nav__link")}>
-                Get results
-              </NavLink>
-            </nav>
+            <div className="header-controls">
+              <nav className="top-nav" aria-label="Primary">
+                <NavLink to="/" end className={({ isActive }) => (isActive ? "top-nav__link top-nav__link--active" : "top-nav__link")}>
+                  Recent jobs
+                </NavLink>
+                <NavLink to="/jobs/new" className={({ isActive }) => (isActive ? "top-nav__link top-nav__link--active" : "top-nav__link")}>
+                  New job
+                </NavLink>
+                <NavLink to="/results" className={({ isActive }) => (isActive ? "top-nav__link top-nav__link--active" : "top-nav__link")}>
+                  Get results
+                </NavLink>
+              </nav>
+              <div className="auth-bar">
+                <AuthStatusBadge />
+                <button type="button" className="btn btn--ghost" onClick={logout} disabled={status !== "authenticated"}>
+                  Logout
+                </button>
+              </div>
+            </div>
           </header>
           {actions ? <div className="screen-actions">{actions}</div> : null}
           {children}
@@ -74,8 +107,210 @@ function AppShell({ title, children, actions }: AppShellProps) {
   );
 }
 
+function AuthLoadingScreen() {
+  return (
+    <main className="app-root auth-screen">
+      <section className="auth-card">
+        <p className="screen-caption">authorization</p>
+        <h1>Restoring session</h1>
+        <p className="notice-muted">Checking local tokens and auth state.</p>
+      </section>
+    </main>
+  );
+}
+
+function ProtectedRoute({ children }: { children: ReactNode }) {
+  const { status } = useAuth();
+  const location = useLocation();
+
+  if (status === "loading") {
+    return <AuthLoadingScreen />;
+  }
+
+  if (status === "unauthenticated") {
+    return (
+      <Navigate
+        to="/login"
+        replace
+        state={{ from: { pathname: location.pathname, search: location.search } }}
+      />
+    );
+  }
+
+  return <>{children}</>;
+}
+
+function LoginPage() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { status, login } = useAuth();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const redirectTarget = (location.state as AuthLocationState | null)?.from;
+
+  useEffect(() => {
+    if (status === "authenticated") {
+      navigate(redirectTarget ? `${redirectTarget.pathname}${redirectTarget.search}` : "/", { replace: true });
+    }
+  }, [navigate, redirectTarget, status]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      await login({ username, password });
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : "Unable to sign in");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="app-root auth-screen">
+      <section className="auth-card">
+        <p className="screen-caption">client authorization</p>
+        <h1>Sign in</h1>
+        <p className="notice-muted">
+          Use your backend account to restore protected access to jobs and results.
+        </p>
+        <form className="job-form" onSubmit={handleSubmit}>
+          <label className="field">
+            <span>Username</span>
+            <input
+              className="input"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="Enter your username"
+              autoComplete="username"
+              required
+            />
+          </label>
+          <label className="field">
+            <span>Password</span>
+            <input
+              className="input"
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="Enter your password"
+              autoComplete="current-password"
+              required
+            />
+          </label>
+          {error ? <div className="inline-message inline-message--error">{error}</div> : null}
+          <button type="submit" className="btn btn--primary btn--wide" disabled={submitting}>
+            {submitting ? "Signing in..." : "Sign in"}
+          </button>
+          <p className="auth-switch">
+            Need an account? <Link className="auth-link" to="/signup">Create one</Link>
+          </p>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function SignupPage() {
+  const navigate = useNavigate();
+  const { status, signup } = useAuth();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (status === "authenticated") {
+      navigate("/", { replace: true });
+    }
+  }, [navigate, status]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (password !== confirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
+
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      await signup({ username, password });
+    } catch (signupError) {
+      setError(signupError instanceof Error ? signupError.message : "Unable to sign up");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="app-root auth-screen">
+      <section className="auth-card">
+        <p className="screen-caption">client authorization</p>
+        <h1>Sign up</h1>
+        <p className="notice-muted">
+          Create a backend account. Your password is stored as a secure hash in PostgreSQL.
+        </p>
+        <form className="job-form" onSubmit={handleSubmit}>
+          <label className="field">
+            <span>Username</span>
+            <input
+              className="input"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="Choose a username"
+              autoComplete="username"
+              required
+            />
+          </label>
+          <label className="field">
+            <span>Password</span>
+            <input
+              className="input"
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="At least 8 characters"
+              autoComplete="new-password"
+              required
+            />
+          </label>
+          <label className="field">
+            <span>Confirm password</span>
+            <input
+              className="input"
+              type="password"
+              value={confirmPassword}
+              onChange={(event) => setConfirmPassword(event.target.value)}
+              placeholder="Repeat your password"
+              autoComplete="new-password"
+              required
+            />
+          </label>
+          {error ? <div className="inline-message inline-message--error">{error}</div> : null}
+          <button type="submit" className="btn btn--primary btn--wide" disabled={submitting}>
+            {submitting ? "Creating account..." : "Create account"}
+          </button>
+          <p className="auth-switch">
+            Already have an account? <Link className="auth-link" to="/login">Sign in</Link>
+          </p>
+        </form>
+      </section>
+    </main>
+  );
+}
+
 function JobsPage() {
   const navigate = useNavigate();
+  const { authFetch } = useAuth();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [sortField, setSortField] = useState<SortField>(DEFAULT_SORT_FIELD);
   const [sortOrder, setSortOrder] = useState<SortOrder>(DEFAULT_SORT_ORDER);
@@ -90,7 +325,7 @@ function JobsPage() {
       setError(null);
 
       try {
-        const response = await fetch(`/api/v1/jobs?sort_by=${sortField}&sort_order=${sortOrder}`, {
+        const response = await authFetch(`/api/v1/jobs?sort_by=${sortField}&sort_order=${sortOrder}`, {
           signal: controller.signal,
         });
 
@@ -114,7 +349,7 @@ function JobsPage() {
     void loadJobs();
 
     return () => controller.abort();
-  }, [sortField, sortOrder]);
+  }, [authFetch, sortField, sortOrder]);
 
   function toggleSort(field: SortField) {
     if (field === sortField) {
@@ -349,10 +584,40 @@ function ResultsPage() {
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<JobsPage />} />
-      <Route path="/jobs/new" element={<CreateJobPage />} />
-      <Route path="/jobs/:jobId/created" element={<JobCreatedPage />} />
-      <Route path="/results" element={<ResultsPage />} />
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/signup" element={<SignupPage />} />
+      <Route
+        path="/"
+        element={
+          <ProtectedRoute>
+            <JobsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/jobs/new"
+        element={
+          <ProtectedRoute>
+            <CreateJobPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/jobs/:jobId/created"
+        element={
+          <ProtectedRoute>
+            <JobCreatedPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/results"
+        element={
+          <ProtectedRoute>
+            <ResultsPage />
+          </ProtectedRoute>
+        }
+      />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

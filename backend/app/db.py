@@ -2,13 +2,24 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timezone
 from typing import Final
 from uuid import uuid4
 
 from psycopg import connect
 from psycopg.rows import dict_row
 
-from app.schemas import JobCreate, JobData, JobUpdate, SortBy, SortOrder
+from app.schemas import (
+    AuthTokens,
+    JobCreate,
+    JobData,
+    JobUpdate,
+    SortBy,
+    SortOrder,
+    UserAuthPayload,
+    UserData,
+)
+from app.security import create_access_token, create_refresh_token, hash_password, verify_password
 
 SORT_COLUMN_MAP: Final[dict[SortBy, str]] = {
     "created_at": "created_at",
@@ -32,6 +43,10 @@ SEED_JOBS: Final[list[tuple[str, str, str, str, str]]] = [
 
 
 class DatabaseError(Exception):
+    pass
+
+
+class AuthError(Exception):
     pass
 
 
@@ -66,17 +81,62 @@ def _execute_fetchone(query: str, params: tuple[object, ...] = ()) -> dict | Non
         raise DatabaseError("Database operation failed") from error
 
 
-def _execute_commit(query: str, params: tuple[object, ...]) -> dict | None:
+def _execute_commit(query: str, params: tuple[object, ...] = ()) -> dict | None:
     try:
         with get_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(query, params)
                 row = cursor.fetchone()
-
             connection.commit()
             return row
     except Exception as error:
         raise DatabaseError("Database operation failed") from error
+
+
+def _execute_commit_without_return(query: str, params: tuple[object, ...] = ()) -> None:
+    try:
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(query, params)
+            connection.commit()
+    except Exception as error:
+        raise DatabaseError("Database operation failed") from error
+
+
+def _create_tables(connection) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'completed', 'failed')),
+                created_at TIMESTAMPTZ NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                refresh_token TEXT NOT NULL UNIQUE,
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            )
+            """
+        )
 
 
 def init_db() -> None:
@@ -85,6 +145,7 @@ def init_db() -> None:
     for _ in range(10):
         try:
             with get_connection() as connection:
+                _create_tables(connection)
                 with connection.cursor() as cursor:
                     cursor.executemany(
                         """
@@ -94,7 +155,6 @@ def init_db() -> None:
                         """,
                         SEED_JOBS,
                     )
-
                 connection.commit()
                 return
         except Exception as error:
@@ -113,9 +173,7 @@ def list_jobs(sort_by: SortBy, sort_order: SortOrder) -> list[JobData]:
         FROM jobs
         ORDER BY {sort_column} {sort_direction}, id ASC
     """
-
     rows = _execute_fetchall(query)
-
     return [JobData.model_validate(dict(row)) for row in rows]
 
 
@@ -124,10 +182,8 @@ def get_job(job_id: str) -> JobData | None:
         "SELECT id, name, filename, status, created_at FROM jobs WHERE id = %s",
         (job_id,),
     )
-
     if row is None:
         return None
-
     return JobData.model_validate(dict(row))
 
 
@@ -140,10 +196,8 @@ def create_job(payload: JobCreate) -> JobData:
         """,
         (str(uuid4()), payload.name, payload.filename, payload.status),
     )
-
     if row is None:
         raise DatabaseError("Failed to create job")
-
     return JobData.model_validate(dict(row))
 
 
@@ -166,16 +220,108 @@ def update_job(job_id: str, payload: JobUpdate) -> JobData | None:
             job_id,
         ),
     )
-
     if row is None:
         return None
-
     return JobData.model_validate(dict(row))
 
 
 def delete_job(job_id: str) -> bool:
-    row = _execute_commit(
-        "DELETE FROM jobs WHERE id = %s RETURNING id",
-        (job_id,),
-    )
+    row = _execute_commit("DELETE FROM jobs WHERE id = %s RETURNING id", (job_id,))
     return row is not None
+
+
+def _build_auth_tokens(user_row: dict) -> AuthTokens:
+    access_token, access_expires_at = create_access_token(user_row["id"], user_row["username"])
+    refresh_token, refresh_expires_at = create_refresh_token()
+    _execute_commit_without_return(
+        """
+        INSERT INTO user_sessions (id, user_id, refresh_token, expires_at, created_at)
+        VALUES (%s, %s, %s, %s, NOW())
+        """,
+        (str(uuid4()), user_row["id"], refresh_token, refresh_expires_at),
+    )
+    return AuthTokens(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_at=access_expires_at,
+        user=UserData.model_validate(
+            {
+                "id": user_row["id"],
+                "username": user_row["username"],
+                "created_at": user_row["created_at"],
+            }
+        ),
+    )
+
+
+def create_user(payload: UserAuthPayload) -> AuthTokens:
+    existing_user = _execute_fetchone("SELECT id FROM users WHERE username = %s", (payload.username,))
+    if existing_user is not None:
+        raise AuthError("Username is already taken")
+
+    row = _execute_commit(
+        """
+        INSERT INTO users (id, username, password_hash, created_at)
+        VALUES (%s, %s, %s, NOW())
+        RETURNING id, username, created_at
+        """,
+        (str(uuid4()), payload.username, hash_password(payload.password)),
+    )
+    if row is None:
+        raise DatabaseError("Failed to create user")
+    return _build_auth_tokens(dict(row))
+
+
+def authenticate_user(payload: UserAuthPayload) -> AuthTokens:
+    row = _execute_fetchone(
+        "SELECT id, username, password_hash, created_at FROM users WHERE username = %s",
+        (payload.username,),
+    )
+    if row is None or not verify_password(payload.password, row["password_hash"]):
+        raise AuthError("Invalid username or password")
+
+    return _build_auth_tokens(dict(row))
+
+
+def refresh_auth_tokens(refresh_token: str) -> AuthTokens:
+    row = _execute_fetchone(
+        """
+        SELECT s.id AS session_id, s.user_id, s.refresh_token, s.expires_at, u.username, u.created_at
+        FROM user_sessions s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.refresh_token = %s
+        """,
+        (refresh_token,),
+    )
+    if row is None:
+        raise AuthError("Invalid refresh token")
+
+    expires_at = row["expires_at"]
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        _execute_commit_without_return("DELETE FROM user_sessions WHERE id = %s", (row["session_id"],))
+        raise AuthError("Refresh token expired")
+
+    _execute_commit_without_return("DELETE FROM user_sessions WHERE id = %s", (row["session_id"],))
+    return _build_auth_tokens(
+        {
+            "id": row["user_id"],
+            "username": row["username"],
+            "created_at": row["created_at"],
+        }
+    )
+
+
+def get_user_by_id(user_id: str) -> UserData | None:
+    row = _execute_fetchone(
+        "SELECT id, username, created_at FROM users WHERE id = %s",
+        (user_id,),
+    )
+    if row is None:
+        return None
+    return UserData.model_validate(dict(row))
+
+
+def delete_session(refresh_token: str) -> None:
+    _execute_commit_without_return("DELETE FROM user_sessions WHERE refresh_token = %s", (refresh_token,))
