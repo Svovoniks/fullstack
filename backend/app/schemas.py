@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 JobStatus = Literal["queued", "processing", "completed", "failed"]
@@ -15,3 +15,30 @@ class JobData(BaseModel):
     filename: str
     status: JobStatus
     created_at: datetime
+
+
+class JobCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    filename: str = Field(min_length=1, max_length=255)
+    status: JobStatus = "queued"
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class JobUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    filename: str | None = Field(default=None, min_length=1, max_length=255)
+    status: JobStatus | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @model_validator(mode="after")
+    def validate_non_empty_payload(self) -> "JobUpdate":
+        if self.name is None and self.filename is None and self.status is None:
+            raise ValueError("At least one field must be provided")
+
+        return self
+
+
+class ErrorResponse(BaseModel):
+    detail: str

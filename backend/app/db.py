@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 import time
 from typing import Final
+from uuid import uuid4
 
 from psycopg import connect
 from psycopg.rows import dict_row
 
-from app.schemas import JobData, SortBy, SortOrder
+from app.schemas import JobCreate, JobData, JobUpdate, SortBy, SortOrder
 
 SORT_COLUMN_MAP: Final[dict[SortBy, str]] = {
     "created_at": "created_at",
@@ -30,6 +31,10 @@ SEED_JOBS: Final[list[tuple[str, str, str, str, str]]] = [
 ]
 
 
+class DatabaseError(Exception):
+    pass
+
+
 def get_connection():
     return connect(
         host=os.getenv("POSTGRES_HOST", "localhost"),
@@ -39,6 +44,39 @@ def get_connection():
         password=os.getenv("POSTGRES_PASSWORD", "redaction"),
         row_factory=dict_row,
     )
+
+
+def _execute_fetchall(query: str, params: tuple[object, ...] = ()) -> list[dict]:
+    try:
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(query, params)
+                return cursor.fetchall()
+    except Exception as error:
+        raise DatabaseError("Database operation failed") from error
+
+
+def _execute_fetchone(query: str, params: tuple[object, ...] = ()) -> dict | None:
+    try:
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(query, params)
+                return cursor.fetchone()
+    except Exception as error:
+        raise DatabaseError("Database operation failed") from error
+
+
+def _execute_commit(query: str, params: tuple[object, ...]) -> dict | None:
+    try:
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(query, params)
+                row = cursor.fetchone()
+
+            connection.commit()
+            return row
+    except Exception as error:
+        raise DatabaseError("Database operation failed") from error
 
 
 def init_db() -> None:
@@ -76,24 +114,68 @@ def list_jobs(sort_by: SortBy, sort_order: SortOrder) -> list[JobData]:
         ORDER BY {sort_column} {sort_direction}, id ASC
     """
 
-    with get_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(query)
-            rows = cursor.fetchall()
+    rows = _execute_fetchall(query)
 
     return [JobData.model_validate(dict(row)) for row in rows]
 
 
 def get_job(job_id: str) -> JobData | None:
-    with get_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT id, name, filename, status, created_at FROM jobs WHERE id = %s",
-                (job_id,),
-            )
-            row = cursor.fetchone()
+    row = _execute_fetchone(
+        "SELECT id, name, filename, status, created_at FROM jobs WHERE id = %s",
+        (job_id,),
+    )
 
     if row is None:
         return None
 
     return JobData.model_validate(dict(row))
+
+
+def create_job(payload: JobCreate) -> JobData:
+    row = _execute_commit(
+        """
+        INSERT INTO jobs (id, name, filename, status, created_at)
+        VALUES (%s, %s, %s, %s, NOW())
+        RETURNING id, name, filename, status, created_at
+        """,
+        (str(uuid4()), payload.name, payload.filename, payload.status),
+    )
+
+    if row is None:
+        raise DatabaseError("Failed to create job")
+
+    return JobData.model_validate(dict(row))
+
+
+def update_job(job_id: str, payload: JobUpdate) -> JobData | None:
+    current_job = get_job(job_id)
+    if current_job is None:
+        return None
+
+    row = _execute_commit(
+        """
+        UPDATE jobs
+        SET name = %s, filename = %s, status = %s
+        WHERE id = %s
+        RETURNING id, name, filename, status, created_at
+        """,
+        (
+            payload.name if payload.name is not None else current_job.name,
+            payload.filename if payload.filename is not None else current_job.filename,
+            payload.status if payload.status is not None else current_job.status,
+            job_id,
+        ),
+    )
+
+    if row is None:
+        return None
+
+    return JobData.model_validate(dict(row))
+
+
+def delete_job(job_id: str) -> bool:
+    row = _execute_commit(
+        "DELETE FROM jobs WHERE id = %s RETURNING id",
+        (job_id,),
+    )
+    return row is not None
