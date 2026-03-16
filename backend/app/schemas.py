@@ -4,6 +4,8 @@ from pydantic import BaseModel
 
 
 JobStatus = Literal["queued", "processing", "completed", "failed"]
+SortBy = Literal["created_at", "id", "name", "status", "filename"]
+SortOrder = Literal["asc", "desc"]
 
 
 class JobData(BaseModel):
@@ -11,3 +13,4 @@ class JobData(BaseModel):
     name: str
     filename: str
     status: JobStatus
+    created_at: str

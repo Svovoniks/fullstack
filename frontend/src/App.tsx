@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Link,
   Navigate,
@@ -11,13 +11,16 @@ import {
   useSearchParams,
 } from "react-router-dom";
 
-type JobStatus = "queued" | "processing" | "done" | "error";
+type JobStatus = "queued" | "processing" | "completed" | "failed";
+type SortField = "created_at" | "id" | "name" | "status" | "filename";
+type SortOrder = "asc" | "desc";
 
 type Job = {
   id: string;
   name: string;
+  filename: string;
   status: JobStatus;
-  link: string;
+  created_at: string;
 };
 
 type AppShellProps = {
@@ -31,31 +34,14 @@ type CreatedState = {
   fileCount: number;
 };
 
-const RECENT_JOBS: Job[] = [
-  {
-    id: "2f37f63b-7341-46e6-80d7-2d23d373efca",
-    name: "parking-cam-01",
-    status: "done",
-    link: "/results?jobId=2f37f63b-7341-46e6-80d7-2d23d373efca",
-  },
-  {
-    id: "0103fae2-c950-489d-b6b8-ead4de6e3a6f",
-    name: "office-entrance",
-    status: "processing",
-    link: "/results?jobId=0103fae2-c950-489d-b6b8-ead4de6e3a6f",
-  },
-  {
-    id: "7cc087f9-d212-4e19-a0de-40ae46d5d920",
-    name: "passport-scan",
-    status: "queued",
-    link: "/results?jobId=7cc087f9-d212-4e19-a0de-40ae46d5d920",
-  },
-  {
-    id: "cd4d31ef-7724-463c-82ea-8b091f75a6e0",
-    name: "street-photo",
-    status: "error",
-    link: "/results?jobId=cd4d31ef-7724-463c-82ea-8b091f75a6e0",
-  },
+const DEFAULT_SORT_FIELD: SortField = "created_at";
+const DEFAULT_SORT_ORDER: SortOrder = "desc";
+const SORTABLE_COLUMNS: { field: SortField; label: string }[] = [
+  { field: "created_at", label: "Created" },
+  { field: "id", label: "ID" },
+  { field: "name", label: "Name" },
+  { field: "filename", label: "Filename" },
+  { field: "status", label: "Status" },
 ];
 
 function AppShell({ title, children, actions }: AppShellProps) {
@@ -90,6 +76,63 @@ function AppShell({ title, children, actions }: AppShellProps) {
 
 function JobsPage() {
   const navigate = useNavigate();
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [sortField, setSortField] = useState<SortField>(DEFAULT_SORT_FIELD);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(DEFAULT_SORT_ORDER);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadJobs() {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const response = await fetch(`/api/v1/jobs?sort_by=${sortField}&sort_order=${sortOrder}`, {
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to load jobs (${response.status})`);
+        }
+
+        const data: Job[] = await response.json();
+        setJobs(data);
+      } catch (fetchError) {
+        if (fetchError instanceof DOMException && fetchError.name === "AbortError") {
+          return;
+        }
+
+        setError(fetchError instanceof Error ? fetchError.message : "Failed to load jobs");
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    void loadJobs();
+
+    return () => controller.abort();
+  }, [sortField, sortOrder]);
+
+  function toggleSort(field: SortField) {
+    if (field === sortField) {
+      setSortOrder((currentOrder) => (currentOrder === "asc" ? "desc" : "asc"));
+      return;
+    }
+
+    setSortField(field);
+    setSortOrder(field === "created_at" ? "desc" : "asc");
+  }
+
+  function getSortIndicator(field: SortField) {
+    if (field !== sortField) {
+      return "";
+    }
+
+    return sortOrder === "asc" ? " ↑" : " ↓";
+  }
 
   return (
     <AppShell
@@ -109,22 +152,50 @@ function JobsPage() {
         <table className="jobs-table">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Name</th>
-              <th>Status</th>
+              {SORTABLE_COLUMNS.map((column) => (
+                <th key={column.field}>
+                  <button type="button" className="sort-button" onClick={() => toggleSort(column.field)}>
+                    {column.label}
+                    {getSortIndicator(column.field)}
+                  </button>
+                </th>
+              ))}
               <th>Link</th>
             </tr>
           </thead>
           <tbody>
-            {RECENT_JOBS.map((job) => (
+            {loading ? (
+              <tr>
+                <td colSpan={6} className="table-state">
+                  Loading recent jobs...
+                </td>
+              </tr>
+            ) : null}
+            {!loading && error ? (
+              <tr>
+                <td colSpan={6} className="table-state table-state--error">
+                  {error}
+                </td>
+              </tr>
+            ) : null}
+            {!loading && !error && jobs.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="table-state">
+                  No jobs found.
+                </td>
+              </tr>
+            ) : null}
+            {!loading && !error && jobs.map((job) => (
               <tr key={job.id}>
+                <td>{new Date(job.created_at).toLocaleString()}</td>
                 <td>{job.id}</td>
                 <td>{job.name}</td>
+                <td>{job.filename}</td>
                 <td>
                   <span className={`status status--${job.status}`}>{job.status}</span>
                 </td>
                 <td>
-                  <Link className="table-link" to={job.link}>
+                  <Link className="table-link" to={`/results?jobId=${job.id}`}>
                     Open
                   </Link>
                 </td>

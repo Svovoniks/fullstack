@@ -161,6 +161,29 @@ h1 {
   font-weight: 600;
 }
 
+.sort-button {
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+}
+
+.sort-button:hover {
+  color: #ffffff;
+}
+
+.table-state {
+  color: #99a0ab;
+  text-align: center;
+}
+
+.table-state--error {
+  color: #ff9c9c;
+}
+
 .status {
   display: inline-block;
   border: 1px solid #777d88;
@@ -170,7 +193,7 @@ h1 {
   font-size: 12px;
 }
 
-.status--done {
+.status--completed {
   border-color: #34c759;
   color: #8ef0a6;
 }
@@ -185,7 +208,7 @@ h1 {
   color: #ffd486;
 }
 
-.status--error {
+.status--failed {
   border-color: #eb5757;
   color: #ff9c9c;
 }
