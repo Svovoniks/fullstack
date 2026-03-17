@@ -14,6 +14,13 @@ class StorageError(Exception):
     pass
 
 
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if value:
+        return value
+    raise StorageError(f"Missing required environment variable: {name}")
+
+
 @dataclass(frozen=True)
 class StorageConfig:
     endpoint_url: str
@@ -75,11 +82,11 @@ class ObjectStorage:
 
 def get_storage_config() -> StorageConfig:
     return StorageConfig(
-        endpoint_url=os.getenv("S3_ENDPOINT_URL", "http://minio:9000"),
-        region_name=os.getenv("S3_REGION", "us-east-1"),
-        access_key_id=os.getenv("S3_ACCESS_KEY_ID", "minioadmin"),
-        secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY", "minioadmin"),
-        bucket_name=os.getenv("S3_BUCKET_NAME", "redaction-images"),
+        endpoint_url=_require_env("S3_ENDPOINT_URL"),
+        region_name=_require_env("S3_REGION"),
+        access_key_id=_require_env("S3_ACCESS_KEY_ID"),
+        secret_access_key=_require_env("S3_SECRET_ACCESS_KEY"),
+        bucket_name=_require_env("S3_BUCKET_NAME"),
     )
 
 

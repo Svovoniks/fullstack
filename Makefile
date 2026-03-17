@@ -1,10 +1,12 @@
 .PHONY: run seed-admin-jobs
 
+ifneq (,$(wildcard .env))
+include .env
+export
+endif
+
 POSTGRES_HOST ?= localhost
 POSTGRES_PORT ?= 5432
-POSTGRES_DB ?= redaction
-POSTGRES_USER ?= redaction
-POSTGRES_PASSWORD ?= redaction
 
 run:
 	docker-compose down -v --remove-orphans

@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 
 from app.api.routes import router as jobs_router
-from app.db import DatabaseError, ensure_default_admin_user, ensure_schema, get_user_by_id
+from app.db import DatabaseError, get_user_by_id
 from app.security import decode_access_token
 from app.storage import StorageError, get_storage
 from app.worker import JobWorker
@@ -56,8 +56,6 @@ def root() -> dict[str, str]:
 
 @app.on_event("startup")
 def startup() -> None:
-    ensure_schema()
-    ensure_default_admin_user()
     get_storage().ensure_bucket()
     job_worker.start()
 

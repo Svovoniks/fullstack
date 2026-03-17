@@ -4,7 +4,6 @@ import os
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import datetime, timezone
 import json
-from typing import Final
 from uuid import uuid4
 
 from psycopg import connect
@@ -23,7 +22,7 @@ from app.schemas import (
 )
 from app.security import create_access_token, create_refresh_token, hash_password, verify_password
 
-SORT_COLUMN_MAP: Final[dict[SortBy, str]] = {
+SORT_COLUMN_MAP: dict[SortBy, str] = {
     "created_at": "created_at",
     "id": "id",
     "name": "name",
@@ -31,13 +30,10 @@ SORT_COLUMN_MAP: Final[dict[SortBy, str]] = {
     "filename": "filename",
 }
 
-SORT_DIRECTION_MAP: Final[dict[SortOrder, str]] = {
+SORT_DIRECTION_MAP: dict[SortOrder, str] = {
     "asc": "ASC",
     "desc": "DESC",
 }
-
-DEFAULT_ADMIN_USERNAME: Final[str] = "admin"
-DEFAULT_ADMIN_PASSWORD_HASH: Final[str] = "100000$OWWBT0KnAkj07QqlYNSecw==$1D89gEkPsGX5q3a69TtpudsQ2QrF5cQPW21LMcYVfWw="
 
 class DatabaseError(Exception):
     pass
@@ -45,6 +41,13 @@ class DatabaseError(Exception):
 
 class AuthError(Exception):
     pass
+
+
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if value:
+        return value
+    raise DatabaseError(f"Missing required environment variable: {name}")
 
 
 def _job_columns(table_name: str = "jobs") -> str:
@@ -65,11 +68,11 @@ def _job_columns(table_name: str = "jobs") -> str:
 
 def get_connection():
     return connect(
-        host=os.getenv("POSTGRES_HOST", "localhost"),
-        port=int(os.getenv("POSTGRES_PORT", "5432")),
-        dbname=os.getenv("POSTGRES_DB", "redaction"),
-        user=os.getenv("POSTGRES_USER", "redaction"),
-        password=os.getenv("POSTGRES_PASSWORD", "redaction"),
+        host=_require_env("POSTGRES_HOST"),
+        port=int(_require_env("POSTGRES_PORT")),
+        dbname=_require_env("POSTGRES_DB"),
+        user=_require_env("POSTGRES_USER"),
+        password=_require_env("POSTGRES_PASSWORD"),
         row_factory=dict_row,
     )
 
@@ -114,29 +117,6 @@ def _execute_commit_without_return(query: str, params: tuple[object, ...] = ()) 
             connection.commit()
     except Exception as error:
         raise DatabaseError("Database operation failed") from error
-
-def ensure_schema() -> None:
-    _execute_commit_without_return(
-        """
-        ALTER TABLE jobs
-        ADD COLUMN IF NOT EXISTS source_object_key TEXT,
-        ADD COLUMN IF NOT EXISTS result_object_key TEXT,
-        ADD COLUMN IF NOT EXISTS content_type TEXT,
-        ADD COLUMN IF NOT EXISTS result_content_type TEXT,
-        ADD COLUMN IF NOT EXISTS error_message TEXT
-        """
-    )
-
-
-def ensure_default_admin_user() -> None:
-    _execute_commit_without_return(
-        """
-        INSERT INTO users (id, username, password_hash, created_at)
-        VALUES (%s, %s, %s, NOW())
-        ON CONFLICT (username) DO NOTHING
-        """,
-        (str(uuid4()), DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD_HASH),
-    )
 
 
 def list_jobs(user_id: str, sort_by: SortBy, sort_order: SortOrder) -> list[JobData]:

@@ -17,6 +17,13 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if value:
+        return value
+    raise ValueError(f"Missing required environment variable: {name}")
+
+
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     derived_key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
@@ -40,7 +47,7 @@ def create_access_token(user_id: str, username: str) -> tuple[str, datetime]:
         "type": "access",
     }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    secret = os.getenv("APP_SECRET_KEY", "development-secret-key").encode("utf-8")
+    secret = _require_env("APP_SECRET_KEY").encode("utf-8")
     signature = hmac.new(secret, payload_bytes, hashlib.sha256).digest()
     token = ".".join(
         [
@@ -55,7 +62,7 @@ def decode_access_token(token: str) -> dict[str, str | int]:
     payload_part, signature_part = token.split(".", maxsplit=1)
     payload_bytes = base64.urlsafe_b64decode(f"{payload_part}==")
     signature = base64.urlsafe_b64decode(f"{signature_part}==")
-    secret = os.getenv("APP_SECRET_KEY", "development-secret-key").encode("utf-8")
+    secret = _require_env("APP_SECRET_KEY").encode("utf-8")
     expected_signature = hmac.new(secret, payload_bytes, hashlib.sha256).digest()
 
     if not hmac.compare_digest(signature, expected_signature):
