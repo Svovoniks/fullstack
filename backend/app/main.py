@@ -4,7 +4,8 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 
 from app.api.routes import router as jobs_router
-from app.db import DatabaseError, init_db
+from app.db import DatabaseError, get_user_by_id
+from app.security import decode_access_token
 
 app = FastAPI(
     title="Personal Data Redaction API",
@@ -19,6 +20,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    protected_paths = ("/api/v1/jobs", "/api/v1/auth/me")
+    if request.url.path.startswith(protected_paths):
+        authorization = request.headers.get("Authorization", "")
+        if not authorization.startswith("Bearer "):
+            return JSONResponse(status_code=401, content={"detail": "Missing bearer token"})
+
+        token = authorization.split(" ", maxsplit=1)[1]
+        try:
+            payload = decode_access_token(token)
+        except ValueError as error:
+            return JSONResponse(status_code=401, content={"detail": str(error)})
+
+        user = get_user_by_id(str(payload["sub"]))
+        if user is None:
+            return JSONResponse(status_code=401, content={"detail": "User not found"})
+
+        request.state.current_user = user
+
+    return await call_next(request)
 
 
 @app.get("/", tags=["system"])
@@ -41,11 +65,5 @@ def validation_error_handler(_: Request, exc: RequestValidationError) -> JSONRes
 @app.exception_handler(HTTPException)
 def http_error_handler(_: Request, exc: HTTPException) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content={"detail": str(exc.detail)})
-
-
-@app.on_event("startup")
-def startup() -> None:
-    init_db()
-
 
 app.include_router(jobs_router, prefix="/api/v1")

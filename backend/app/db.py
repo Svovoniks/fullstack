@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import time
 from datetime import datetime, timezone
 from typing import Final
 from uuid import uuid4
@@ -33,14 +32,6 @@ SORT_DIRECTION_MAP: Final[dict[SortOrder, str]] = {
     "asc": "ASC",
     "desc": "DESC",
 }
-
-SEED_JOBS: Final[list[tuple[str, str, str, str, str]]] = [
-    ("2f37f63b-7341-46e6-80d7-2d23d373efca", "parking-cam-01", "parking-cam-01.mp4", "completed", "2026-03-16T09:15:00Z"),
-    ("0103fae2-c950-489d-b6b8-ead4de6e3a6f", "office-entrance", "office-entrance.zip", "processing", "2026-03-16T08:50:00Z"),
-    ("7cc087f9-d212-4e19-a0de-40ae46d5d920", "passport-scan", "passport-scan.pdf", "queued", "2026-03-16T08:10:00Z"),
-    ("cd4d31ef-7724-463c-82ea-8b091f75a6e0", "street-photo", "street-photo.jpg", "failed", "2026-03-15T18:25:00Z"),
-]
-
 
 class DatabaseError(Exception):
     pass
@@ -102,107 +93,45 @@ def _execute_commit_without_return(query: str, params: tuple[object, ...] = ()) 
     except Exception as error:
         raise DatabaseError("Database operation failed") from error
 
-
-def _create_tables(connection) -> None:
-    with connection.cursor() as cursor:
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                filename TEXT NOT NULL,
-                status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'completed', 'failed')),
-                created_at TIMESTAMPTZ NOT NULL
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                username TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_sessions (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                refresh_token TEXT NOT NULL UNIQUE,
-                expires_at TIMESTAMPTZ NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL
-            )
-            """
-        )
-
-
-def init_db() -> None:
-    last_error: Exception | None = None
-
-    for _ in range(10):
-        try:
-            with get_connection() as connection:
-                _create_tables(connection)
-                with connection.cursor() as cursor:
-                    cursor.executemany(
-                        """
-                        INSERT INTO jobs (id, name, filename, status, created_at)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (id) DO NOTHING
-                        """,
-                        SEED_JOBS,
-                    )
-                connection.commit()
-                return
-        except Exception as error:
-            last_error = error
-            time.sleep(1)
-
-    if last_error is not None:
-        raise last_error
-
-
-def list_jobs(sort_by: SortBy, sort_order: SortOrder) -> list[JobData]:
+def list_jobs(user_id: str, sort_by: SortBy, sort_order: SortOrder) -> list[JobData]:
     sort_column = SORT_COLUMN_MAP[sort_by]
     sort_direction = SORT_DIRECTION_MAP[sort_order]
     query = f"""
         SELECT id, name, filename, status, created_at
         FROM jobs
+        WHERE user_id = %s
         ORDER BY {sort_column} {sort_direction}, id ASC
     """
-    rows = _execute_fetchall(query)
+    rows = _execute_fetchall(query, (user_id,))
     return [JobData.model_validate(dict(row)) for row in rows]
 
 
-def get_job(job_id: str) -> JobData | None:
+def get_job(job_id: str, user_id: str) -> JobData | None:
     row = _execute_fetchone(
-        "SELECT id, name, filename, status, created_at FROM jobs WHERE id = %s",
-        (job_id,),
+        "SELECT id, name, filename, status, created_at FROM jobs WHERE id = %s AND user_id = %s",
+        (job_id, user_id),
     )
     if row is None:
         return None
     return JobData.model_validate(dict(row))
 
 
-def create_job(payload: JobCreate) -> JobData:
+def create_job(user_id: str, payload: JobCreate) -> JobData:
     row = _execute_commit(
         """
-        INSERT INTO jobs (id, name, filename, status, created_at)
-        VALUES (%s, %s, %s, %s, NOW())
+        INSERT INTO jobs (id, user_id, name, filename, status, created_at)
+        VALUES (%s, %s, %s, %s, %s, NOW())
         RETURNING id, name, filename, status, created_at
         """,
-        (str(uuid4()), payload.name, payload.filename, payload.status),
+        (str(uuid4()), user_id, payload.name, payload.filename, payload.status),
     )
     if row is None:
         raise DatabaseError("Failed to create job")
     return JobData.model_validate(dict(row))
 
 
-def update_job(job_id: str, payload: JobUpdate) -> JobData | None:
-    current_job = get_job(job_id)
+def update_job(job_id: str, user_id: str, payload: JobUpdate) -> JobData | None:
+    current_job = get_job(job_id, user_id)
     if current_job is None:
         return None
 
@@ -210,7 +139,7 @@ def update_job(job_id: str, payload: JobUpdate) -> JobData | None:
         """
         UPDATE jobs
         SET name = %s, filename = %s, status = %s
-        WHERE id = %s
+        WHERE id = %s AND user_id = %s
         RETURNING id, name, filename, status, created_at
         """,
         (
@@ -218,6 +147,7 @@ def update_job(job_id: str, payload: JobUpdate) -> JobData | None:
             payload.filename if payload.filename is not None else current_job.filename,
             payload.status if payload.status is not None else current_job.status,
             job_id,
+            user_id,
         ),
     )
     if row is None:
@@ -225,8 +155,8 @@ def update_job(job_id: str, payload: JobUpdate) -> JobData | None:
     return JobData.model_validate(dict(row))
 
 
-def delete_job(job_id: str) -> bool:
-    row = _execute_commit("DELETE FROM jobs WHERE id = %s RETURNING id", (job_id,))
+def delete_job(job_id: str, user_id: str) -> bool:
+    row = _execute_commit("DELETE FROM jobs WHERE id = %s AND user_id = %s RETURNING id", (job_id, user_id))
     return row is not None
 
 
