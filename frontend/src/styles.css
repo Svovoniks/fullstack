@@ -261,6 +261,26 @@ h1 {
   color: #b8dcff;
 }
 
+.pagination-bar {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pagination-summary {
+  color: #99a0ab;
+  font-size: 14px;
+}
+
+.pagination-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .job-form {
   display: grid;
   gap: 14px;

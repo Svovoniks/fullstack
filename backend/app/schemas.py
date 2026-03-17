@@ -22,6 +22,11 @@ class JobData(BaseModel):
     error_message: str | None = None
 
 
+class JobsPage(BaseModel):
+    items: list[JobData]
+    next_cursor: str | None = None
+
+
 class JobCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     filename: str = Field(min_length=1, max_length=255)

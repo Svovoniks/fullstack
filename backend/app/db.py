@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import datetime, timezone
+import json
 from typing import Final
 from uuid import uuid4
 
@@ -12,6 +14,7 @@ from app.schemas import (
     AuthTokens,
     JobCreate,
     JobData,
+    JobsPage,
     JobUpdate,
     SortBy,
     SortOrder,
@@ -137,16 +140,100 @@ def ensure_default_admin_user() -> None:
 
 
 def list_jobs(user_id: str, sort_by: SortBy, sort_order: SortOrder) -> list[JobData]:
+    page = list_jobs_page(user_id, sort_by=sort_by, sort_order=sort_order)
+    return page.items
+
+
+def _encode_jobs_cursor(sort_by: SortBy, sort_order: SortOrder, sort_value: str, job_id: str) -> str:
+    payload = {
+        "sort_by": sort_by,
+        "sort_order": sort_order,
+        "sort_value": sort_value,
+        "id": job_id,
+    }
+    return urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+
+
+def _decode_jobs_cursor(cursor: str) -> dict[str, str]:
+    try:
+        padded_cursor = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(urlsafe_b64decode(padded_cursor.encode("ascii")).decode("utf-8"))
+    except Exception as error:
+        raise DatabaseError("Invalid jobs cursor") from error
+
+    required_keys = {"sort_by", "sort_order", "sort_value", "id"}
+    if not isinstance(payload, dict) or not required_keys.issubset(payload):
+        raise DatabaseError("Invalid jobs cursor")
+
+    return {
+        "sort_by": str(payload["sort_by"]),
+        "sort_order": str(payload["sort_order"]),
+        "sort_value": str(payload["sort_value"]),
+        "id": str(payload["id"]),
+    }
+
+
+def _normalize_cursor_value(sort_by: SortBy, sort_value: str) -> object:
+    if sort_by == "created_at":
+        normalized = datetime.fromisoformat(sort_value)
+        if normalized.tzinfo is None:
+            return normalized.replace(tzinfo=timezone.utc)
+        return normalized
+    return sort_value
+
+
+def list_jobs_page(
+    user_id: str,
+    sort_by: SortBy,
+    sort_order: SortOrder,
+    limit: int = 20,
+    cursor: str | None = None,
+) -> JobsPage:
     sort_column = SORT_COLUMN_MAP[sort_by]
     sort_direction = SORT_DIRECTION_MAP[sort_order]
+
+    params: list[object] = [user_id]
+    where_clause = "WHERE user_id = %s"
+
+    if cursor is not None:
+        cursor_payload = _decode_jobs_cursor(cursor)
+        if cursor_payload["sort_by"] != sort_by or cursor_payload["sort_order"] != sort_order:
+            raise DatabaseError("Jobs cursor does not match the requested sort")
+
+        cursor_id = cursor_payload["id"]
+        cursor_value = _normalize_cursor_value(sort_by, cursor_payload["sort_value"])
+
+        if sort_by == "id":
+            operator = ">" if sort_order == "asc" else "<"
+            where_clause += f" AND id {operator} %s"
+            params.append(cursor_id)
+        else:
+            primary_operator = ">" if sort_order == "asc" else "<"
+            where_clause += f" AND ({sort_column} {primary_operator} %s OR ({sort_column} = %s AND id > %s))"
+            params.extend([cursor_value, cursor_value, cursor_id])
+
+    params.append(limit + 1)
     query = f"""
         SELECT id, name, filename, status, created_at, source_object_key, result_object_key, content_type, result_content_type, error_message
         FROM jobs
-        WHERE user_id = %s
+        {where_clause}
         ORDER BY {sort_column} {sort_direction}, id ASC
+        LIMIT %s
     """
-    rows = _execute_fetchall(query, (user_id,))
-    return [JobData.model_validate(dict(row)) for row in rows]
+    rows = _execute_fetchall(query, tuple(params))
+    jobs = [JobData.model_validate(dict(row)) for row in rows[:limit]]
+
+    next_cursor: str | None = None
+    if len(rows) > limit and jobs:
+        last_job = jobs[-1]
+        cursor_value = getattr(last_job, sort_by)
+        if isinstance(cursor_value, datetime):
+            cursor_value = cursor_value.isoformat()
+        else:
+            cursor_value = str(cursor_value)
+        next_cursor = _encode_jobs_cursor(sort_by, sort_order, cursor_value, last_job.id)
+
+    return JobsPage(items=jobs, next_cursor=next_cursor)
 
 
 def get_job(job_id: str, user_id: str) -> JobData | None:

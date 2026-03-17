@@ -31,6 +31,11 @@ type Job = {
   error_message: string | null;
 };
 
+type JobsPageResponse = {
+  items: Job[];
+  next_cursor: string | null;
+};
+
 type AppShellProps = {
   title: string;
   children: ReactNode;
@@ -338,6 +343,9 @@ function JobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [sortField, setSortField] = useState<SortField>(DEFAULT_SORT_FIELD);
   const [sortOrder, setSortOrder] = useState<SortOrder>(DEFAULT_SORT_ORDER);
+  const [currentCursor, setCurrentCursor] = useState<string | null>(null);
+  const [cursorHistory, setCursorHistory] = useState<string[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -350,7 +358,15 @@ function JobsPage() {
       setError(null);
 
       try {
-        const response = await authFetch(`/api/v1/jobs?sort_by=${sortField}&sort_order=${sortOrder}`, {
+        const query = new URLSearchParams({
+          sort_by: sortField,
+          sort_order: sortOrder,
+        });
+        if (currentCursor) {
+          query.set("cursor", currentCursor);
+        }
+
+        const response = await authFetch(`/api/v1/jobs?${query.toString()}`, {
           signal: controller.signal,
         });
 
@@ -358,14 +374,16 @@ function JobsPage() {
           throw new Error(await readErrorMessage(response));
         }
 
-        const data: Job[] = await response.json();
-        setJobs(data);
+        const data: JobsPageResponse = await response.json();
+        setJobs(data.items);
+        setNextCursor(data.next_cursor);
       } catch (fetchError) {
         if (fetchError instanceof DOMException && fetchError.name === "AbortError") {
           return;
         }
 
         setError(fetchError instanceof Error ? fetchError.message : "Failed to load jobs");
+        setNextCursor(null);
       } finally {
         setLoading(false);
       }
@@ -374,16 +392,20 @@ function JobsPage() {
     void loadJobs();
 
     return () => controller.abort();
-  }, [authFetch, reloadKey, sortField, sortOrder]);
+  }, [authFetch, currentCursor, reloadKey, sortField, sortOrder]);
 
   function toggleSort(field: SortField) {
     if (field === sortField) {
       setSortOrder((currentOrder) => (currentOrder === "asc" ? "desc" : "asc"));
+      setCurrentCursor(null);
+      setCursorHistory([]);
       return;
     }
 
     setSortField(field);
     setSortOrder(field === "created_at" ? "desc" : "asc");
+    setCurrentCursor(null);
+    setCursorHistory([]);
   }
 
   function getSortIndicator(field: SortField) {
@@ -394,12 +416,39 @@ function JobsPage() {
     return sortOrder === "asc" ? " ↑" : " ↓";
   }
 
+  function handleRefresh() {
+    setCurrentCursor(null);
+    setCursorHistory([]);
+    setReloadKey((value) => value + 1);
+  }
+
+  function handleNextPage() {
+    if (!nextCursor || loading) {
+      return;
+    }
+
+    setCursorHistory((history) => [...history, currentCursor ?? ""]);
+    setCurrentCursor(nextCursor);
+  }
+
+  function handlePreviousPage() {
+    if (cursorHistory.length === 0 || loading) {
+      return;
+    }
+
+    const previousCursor = cursorHistory[cursorHistory.length - 1];
+    setCursorHistory((history) => history.slice(0, -1));
+    setCurrentCursor(previousCursor || null);
+  }
+
+  const currentPage = cursorHistory.length + 1;
+
   return (
     <AppShell
       title="Recent jobs"
       actions={
         <>
-          <button type="button" className="btn btn--ghost" onClick={() => setReloadKey((value) => value + 1)} disabled={loading}>
+          <button type="button" className="btn btn--ghost" onClick={handleRefresh} disabled={loading}>
             {loading ? "Refreshing..." : "Refresh"}
           </button>
           <button type="button" className="btn btn--primary" onClick={() => navigate("/results")}>
@@ -471,6 +520,17 @@ function JobsPage() {
             ))}
           </tbody>
         </table>
+      </div>
+      <div className="pagination-bar" aria-label="Recent jobs pagination">
+        <span className="pagination-summary">Page {currentPage} · Up to 20 entries</span>
+        <div className="pagination-actions">
+          <button type="button" className="btn btn--ghost" onClick={handlePreviousPage} disabled={loading || cursorHistory.length === 0}>
+            Previous
+          </button>
+          <button type="button" className="btn btn--ghost" onClick={handleNextPage} disabled={loading || !nextCursor}>
+            Next
+          </button>
+        </div>
       </div>
     </AppShell>
   );

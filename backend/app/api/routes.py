@@ -9,13 +9,14 @@ from app.db import AuthError
 from app.db import authenticate_user
 from app.db import create_job as insert_job
 from app.db import create_user
+from app.db import DatabaseError
 from app.db import delete_job as remove_job
 from app.db import delete_session
 from app.db import get_job as fetch_job
-from app.db import list_jobs as fetch_jobs
+from app.db import list_jobs_page as fetch_jobs_page
 from app.db import refresh_auth_tokens
 from app.db import update_job as save_job
-from app.schemas import AuthTokens, ErrorResponse, JobCreate, JobData, JobUpdate, RefreshTokenPayload, SortBy, SortOrder, UserAuthPayload, UserData
+from app.schemas import AuthTokens, ErrorResponse, JobCreate, JobData, JobsPage, JobUpdate, RefreshTokenPayload, SortBy, SortOrder, UserAuthPayload, UserData
 from app.storage import get_storage
 
 router = APIRouter()
@@ -89,13 +90,17 @@ def get_me(user: UserData = Depends(get_current_user)) -> UserData:
     return user
 
 
-@router.get("/jobs", response_model=list[JobData], tags=["jobs"])
+@router.get("/jobs", response_model=JobsPage, tags=["jobs"])
 def list_jobs(
     sort_by: SortBy = Query(default="created_at"),
     sort_order: SortOrder = Query(default="desc"),
+    cursor: str | None = Query(default=None),
     user: UserData = Depends(get_current_user),
-) -> list[JobData]:
-    return fetch_jobs(user.id, sort_by=sort_by, sort_order=sort_order)
+) -> JobsPage:
+    try:
+        return fetch_jobs_page(user.id, sort_by=sort_by, sort_order=sort_order, cursor=cursor)
+    except DatabaseError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @router.get("/jobs/{job_id}", response_model=JobData, tags=["jobs"])
