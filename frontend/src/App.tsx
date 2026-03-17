@@ -855,13 +855,9 @@ function ResultsPage() {
                   <strong>Created</strong>
                   <span>{new Date(job.created_at).toLocaleString()}</span>
                 </article>
-                <article className="result-card">
-                  <strong>Storage</strong>
-                  <span>{job.result_object_key ? "Original and result stored in S3" : "Original stored in S3"}</span>
-                </article>
               </div>
               {job.error_message ? <p className="inline-message inline-message--error">{job.error_message}</p> : null}
-              <div className="result-grid">
+              <div className="result-grid result-grid--media">
                 <article className="result-card">
                   <strong>Source image</strong>
                   {sourcePreviewUrl ? <img className="result-preview" src={sourcePreviewUrl} alt={`Source for ${job.filename}`} /> : <span>Not available</span>}

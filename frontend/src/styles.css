@@ -383,6 +383,10 @@ h1 {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
+.result-grid--media {
+  margin-top: 10px;
+}
+
 .result-card {
   border: 1px solid #6f7580;
   border-radius: 10px;
