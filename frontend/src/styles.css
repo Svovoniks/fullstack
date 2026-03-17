@@ -221,6 +221,13 @@ h1 {
   color: #ff9c9c;
 }
 
+.table-feedback,
+.results-feedback {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+}
+
 .status {
   display: inline-block;
   border: 1px solid #777d88;
@@ -361,6 +368,24 @@ h1 {
   border-radius: 10px;
   padding: 14px 10px;
   background: rgba(255, 255, 255, 0.02);
+  display: grid;
+  gap: 8px;
+}
+
+.result-card strong {
+  color: #f1f3f5;
+  font-size: 13px;
+}
+
+.result-card span {
+  color: #cdd3dc;
+  overflow-wrap: anywhere;
+}
+
+.created-jobs-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 code {

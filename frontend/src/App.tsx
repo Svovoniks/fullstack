@@ -4,6 +4,7 @@ import {
   Link,
   Navigate,
   NavLink,
+  useParams,
   Route,
   Routes,
   useLocation,
@@ -32,8 +33,7 @@ type AppShellProps = {
 };
 
 type CreatedState = {
-  jobName: string;
-  fileCount: number;
+  jobs: Job[];
 };
 
 type AuthLocationState = {
@@ -52,6 +52,15 @@ const SORTABLE_COLUMNS: { field: SortField; label: string }[] = [
   { field: "filename", label: "Filename" },
   { field: "status", label: "Status" },
 ];
+
+async function readErrorMessage(response: Response) {
+  const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+  return payload?.detail ?? `Request failed (${response.status})`;
+}
+
+function formatJobStatus(status: JobStatus) {
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
 
 function AuthStatusBadge() {
   const { status, session } = useAuth();
@@ -316,6 +325,7 @@ function JobsPage() {
   const [sortOrder, setSortOrder] = useState<SortOrder>(DEFAULT_SORT_ORDER);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -330,7 +340,7 @@ function JobsPage() {
         });
 
         if (!response.ok) {
-          throw new Error(`Failed to load jobs (${response.status})`);
+          throw new Error(await readErrorMessage(response));
         }
 
         const data: Job[] = await response.json();
@@ -349,7 +359,7 @@ function JobsPage() {
     void loadJobs();
 
     return () => controller.abort();
-  }, [authFetch, sortField, sortOrder]);
+  }, [authFetch, reloadKey, sortField, sortOrder]);
 
   function toggleSort(field: SortField) {
     if (field === sortField) {
@@ -374,6 +384,9 @@ function JobsPage() {
       title="Recent jobs"
       actions={
         <>
+          <button type="button" className="btn btn--ghost" onClick={() => setReloadKey((value) => value + 1)} disabled={loading}>
+            {loading ? "Refreshing..." : "Refresh"}
+          </button>
           <button type="button" className="btn btn--primary" onClick={() => navigate("/results")}>
             Get results
           </button>
@@ -409,7 +422,12 @@ function JobsPage() {
             {!loading && error ? (
               <tr>
                 <td colSpan={6} className="table-state table-state--error">
-                  {error}
+                  <div className="table-feedback">
+                    <span>{error}</span>
+                    <button type="button" className="btn btn--ghost" onClick={() => setReloadKey((value) => value + 1)}>
+                      Try again
+                    </button>
+                  </div>
                 </td>
               </tr>
             ) : null}
@@ -445,26 +463,56 @@ function JobsPage() {
 
 function CreateJobPage() {
   const navigate = useNavigate();
+  const { authFetch } = useAuth();
   const [jobName, setJobName] = useState("");
   const [files, setFiles] = useState<File[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const trimmedName = jobName.trim();
+    if (!trimmedName || files.length === 0) {
+      return;
+    }
+
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      const createdJobs = await Promise.all(
+        files.map(async (file, index) => {
+          const response = await authFetch("/api/v1/jobs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: files.length > 1 ? `${trimmedName} ${index + 1}` : trimmedName,
+              filename: file.name,
+              status: "queued",
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(await readErrorMessage(response));
+          }
+
+          return (await response.json()) as Job;
+        }),
+      );
+
+      const state: CreatedState = { jobs: createdJobs };
+      navigate(`/jobs/${createdJobs[0].id}/created`, { state });
+    } catch (creationError) {
+      setError(creationError instanceof Error ? creationError.message : "Failed to create job");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   return (
     <AppShell title="Create new job">
-      <form
-        className="job-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-
-          if (!jobName.trim() || files.length === 0) {
-            return;
-          }
-
-          const createdId = crypto.randomUUID();
-          const state: CreatedState = { jobName: jobName.trim(), fileCount: files.length };
-
-          navigate(`/jobs/${createdId}/created`, { state });
-        }}
-      >
+      <form className="job-form" onSubmit={handleSubmit}>
         <label className="field">
           <span>Name</span>
           <input
@@ -492,8 +540,10 @@ function CreateJobPage() {
           {files.length === 0 ? "No files selected." : `${files.length} file(s) selected`}
         </div>
 
-        <button type="submit" className="btn btn--primary btn--wide" disabled={!jobName.trim() || files.length === 0}>
-          Create
+        {error ? <div className="inline-message inline-message--error">{error}</div> : null}
+
+        <button type="submit" className="btn btn--primary btn--wide" disabled={submitting || !jobName.trim() || files.length === 0}>
+          {submitting ? "Creating..." : "Create"}
         </button>
       </form>
     </AppShell>
@@ -504,6 +554,7 @@ function JobCreatedPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const state = (location.state as CreatedState | null) ?? null;
+  const createdJobs = state?.jobs ?? [];
 
   return (
     <AppShell
@@ -519,8 +570,21 @@ function JobCreatedPage() {
           New job created id <code>{location.pathname.split("/")[2]}</code>
         </p>
         <p className="notice-muted">
-          {state ? `Job name: ${state.jobName}. Files in queue: ${state.fileCount}.` : "You can track status from the recent jobs table."}
+          {createdJobs.length > 0
+            ? `${createdJobs.length} job(s) added to the queue.`
+            : "You can track status from the recent jobs table."}
         </p>
+        {createdJobs.length > 0 ? (
+          <div className="created-jobs-list">
+            {createdJobs.map((job) => (
+              <article key={job.id} className="result-card">
+                <strong>{job.name}</strong>
+                <span>{job.filename}</span>
+                <span className={`status status--${job.status}`}>{job.status}</span>
+              </article>
+            ))}
+          </div>
+        ) : null}
       </section>
     </AppShell>
   );
@@ -528,9 +592,53 @@ function JobCreatedPage() {
 
 function ResultsPage() {
   const navigate = useNavigate();
+  const { authFetch } = useAuth();
   const [searchParams] = useSearchParams();
-  const [jobId, setJobId] = useState(searchParams.get("jobId") ?? "");
-  const [loaded, setLoaded] = useState(Boolean(searchParams.get("jobId")));
+  const initialJobId = searchParams.get("jobId") ?? "";
+  const [jobId, setJobId] = useState(initialJobId);
+  const [lookupId, setLookupId] = useState(initialJobId);
+  const [loading, setLoading] = useState(Boolean(initialJobId));
+  const [error, setError] = useState<string | null>(null);
+  const [job, setJob] = useState<Job | null>(null);
+
+  useEffect(() => {
+    if (!lookupId) {
+      setLoading(false);
+      setError(null);
+      setJob(null);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    async function loadJob() {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const response = await authFetch(`/api/v1/jobs/${lookupId}`, { signal: controller.signal });
+        if (!response.ok) {
+          throw new Error(await readErrorMessage(response));
+        }
+
+        const data = (await response.json()) as Job;
+        setJob(data);
+      } catch (fetchError) {
+        if (fetchError instanceof DOMException && fetchError.name === "AbortError") {
+          return;
+        }
+
+        setJob(null);
+        setError(fetchError instanceof Error ? fetchError.message : "Failed to load job");
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    void loadJob();
+
+    return () => controller.abort();
+  }, [authFetch, lookupId]);
 
   return (
     <AppShell title="Get results">
@@ -543,7 +651,7 @@ function ResultsPage() {
             return;
           }
 
-          setLoaded(true);
+          setLookupId(jobId.trim());
         }}
       >
         <label className="field">
@@ -558,18 +666,46 @@ function ResultsPage() {
         </label>
 
         <button type="submit" className="btn btn--primary btn--wide">
-          Get results
+          {loading ? "Loading..." : "Get results"}
         </button>
 
         <section className="results-panel" aria-live="polite">
-          {!loaded ? (
+          {!lookupId ? (
             <p className="notice-muted">Resulting images will appear here after lookup.</p>
-          ) : (
-            <div className="result-grid">
-              <article className="result-card">{jobId}-face-01.png</article>
-              <article className="result-card">{jobId}-car-plate-02.png</article>
-              <article className="result-card">{jobId}-document-03.pdf</article>
+          ) : loading ? (
+            <p className="notice-muted">Loading job details from the backend...</p>
+          ) : error ? (
+            <div className="results-feedback">
+              <p className="inline-message inline-message--error">{error}</p>
+              <button type="button" className="btn btn--ghost" onClick={() => setLookupId(jobId.trim())} disabled={!jobId.trim()}>
+                Try again
+              </button>
             </div>
+          ) : job ? (
+            <div className="result-grid">
+              <article className="result-card">
+                <strong>ID</strong>
+                <span>{job.id}</span>
+              </article>
+              <article className="result-card">
+                <strong>Name</strong>
+                <span>{job.name}</span>
+              </article>
+              <article className="result-card">
+                <strong>Filename</strong>
+                <span>{job.filename}</span>
+              </article>
+              <article className="result-card">
+                <strong>Status</strong>
+                <span className={`status status--${job.status}`}>{formatJobStatus(job.status)}</span>
+              </article>
+              <article className="result-card">
+                <strong>Created</strong>
+                <span>{new Date(job.created_at).toLocaleString()}</span>
+              </article>
+            </div>
+          ) : (
+            <p className="notice-muted">No data found for this job.</p>
           )}
         </section>
 
@@ -579,6 +715,16 @@ function ResultsPage() {
       </form>
     </AppShell>
   );
+}
+
+function JobRedirectPage() {
+  const { jobId } = useParams();
+
+  if (!jobId) {
+    return <Navigate to="/results" replace />;
+  }
+
+  return <Navigate to={`/results?jobId=${jobId}`} replace />;
 }
 
 export default function App() {
@@ -607,6 +753,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <JobCreatedPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/jobs/:jobId"
+        element={
+          <ProtectedRoute>
+            <JobRedirectPage />
           </ProtectedRoute>
         }
       />
