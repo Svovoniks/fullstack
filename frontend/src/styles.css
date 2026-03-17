@@ -382,6 +382,14 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+.result-preview {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid #525761;
+  background: rgba(0, 0, 0, 0.16);
+  object-fit: cover;
+}
+
 .created-jobs-list {
   display: grid;
   gap: 10px;

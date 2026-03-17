@@ -33,12 +33,31 @@ SORT_DIRECTION_MAP: Final[dict[SortOrder, str]] = {
     "desc": "DESC",
 }
 
+DEFAULT_ADMIN_USERNAME: Final[str] = "admin"
+DEFAULT_ADMIN_PASSWORD_HASH: Final[str] = "100000$OWWBT0KnAkj07QqlYNSecw==$1D89gEkPsGX5q3a69TtpudsQ2QrF5cQPW21LMcYVfWw="
+
 class DatabaseError(Exception):
     pass
 
 
 class AuthError(Exception):
     pass
+
+
+def _job_columns(table_name: str = "jobs") -> str:
+    return """
+        {table_name}.id AS id,
+        {table_name}.user_id AS user_id,
+        {table_name}.name AS name,
+        {table_name}.filename AS filename,
+        {table_name}.status AS status,
+        {table_name}.created_at AS created_at,
+        {table_name}.source_object_key AS source_object_key,
+        {table_name}.result_object_key AS result_object_key,
+        {table_name}.content_type AS content_type,
+        {table_name}.result_content_type AS result_content_type,
+        {table_name}.error_message AS error_message
+    """.format(table_name=table_name)
 
 
 def get_connection():
@@ -93,11 +112,35 @@ def _execute_commit_without_return(query: str, params: tuple[object, ...] = ()) 
     except Exception as error:
         raise DatabaseError("Database operation failed") from error
 
+def ensure_schema() -> None:
+    _execute_commit_without_return(
+        """
+        ALTER TABLE jobs
+        ADD COLUMN IF NOT EXISTS source_object_key TEXT,
+        ADD COLUMN IF NOT EXISTS result_object_key TEXT,
+        ADD COLUMN IF NOT EXISTS content_type TEXT,
+        ADD COLUMN IF NOT EXISTS result_content_type TEXT,
+        ADD COLUMN IF NOT EXISTS error_message TEXT
+        """
+    )
+
+
+def ensure_default_admin_user() -> None:
+    _execute_commit_without_return(
+        """
+        INSERT INTO users (id, username, password_hash, created_at)
+        VALUES (%s, %s, %s, NOW())
+        ON CONFLICT (username) DO NOTHING
+        """,
+        (str(uuid4()), DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD_HASH),
+    )
+
+
 def list_jobs(user_id: str, sort_by: SortBy, sort_order: SortOrder) -> list[JobData]:
     sort_column = SORT_COLUMN_MAP[sort_by]
     sort_direction = SORT_DIRECTION_MAP[sort_order]
     query = f"""
-        SELECT id, name, filename, status, created_at
+        SELECT id, name, filename, status, created_at, source_object_key, result_object_key, content_type, result_content_type, error_message
         FROM jobs
         WHERE user_id = %s
         ORDER BY {sort_column} {sort_direction}, id ASC
@@ -108,7 +151,11 @@ def list_jobs(user_id: str, sort_by: SortBy, sort_order: SortOrder) -> list[JobD
 
 def get_job(job_id: str, user_id: str) -> JobData | None:
     row = _execute_fetchone(
-        "SELECT id, name, filename, status, created_at FROM jobs WHERE id = %s AND user_id = %s",
+        """
+        SELECT id, name, filename, status, created_at, source_object_key, result_object_key, content_type, result_content_type, error_message
+        FROM jobs
+        WHERE id = %s AND user_id = %s
+        """,
         (job_id, user_id),
     )
     if row is None:
@@ -116,18 +163,97 @@ def get_job(job_id: str, user_id: str) -> JobData | None:
     return JobData.model_validate(dict(row))
 
 
-def create_job(user_id: str, payload: JobCreate) -> JobData:
+def create_job(user_id: str, payload: JobCreate, job_id: str | None = None) -> JobData:
     row = _execute_commit(
         """
-        INSERT INTO jobs (id, user_id, name, filename, status, created_at)
-        VALUES (%s, %s, %s, %s, %s, NOW())
-        RETURNING id, name, filename, status, created_at
+        INSERT INTO jobs (
+            id, user_id, name, filename, status, created_at, source_object_key, result_object_key, content_type, result_content_type, error_message
+        )
+        VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s)
+        RETURNING id, name, filename, status, created_at, source_object_key, result_object_key, content_type, result_content_type, error_message
         """,
-        (str(uuid4()), user_id, payload.name, payload.filename, payload.status),
+        (
+            job_id or str(uuid4()),
+            user_id,
+            payload.name,
+            payload.filename,
+            payload.status,
+            payload.source_object_key,
+            payload.result_object_key,
+            payload.content_type,
+            payload.result_content_type,
+            payload.error_message,
+        ),
     )
     if row is None:
         raise DatabaseError("Failed to create job")
     return JobData.model_validate(dict(row))
+
+
+def claim_next_queued_job() -> dict | None:
+    row = _execute_commit(
+        f"""
+        WITH next_job AS (
+            SELECT id
+            FROM jobs
+            WHERE status = 'queued'
+            ORDER BY created_at ASC, id ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE jobs
+        SET
+            status = 'processing',
+            error_message = NULL
+        FROM next_job
+        WHERE jobs.id = next_job.id
+        RETURNING {_job_columns()}
+        """
+    )
+    if row is None:
+        return None
+    return dict(row)
+
+
+def update_job_processing_state(job_id: str, payload: JobUpdate) -> JobData | None:
+    row = _execute_commit(
+        """
+        UPDATE jobs
+        SET
+            status = COALESCE(%s, status),
+            source_object_key = COALESCE(%s, source_object_key),
+            result_object_key = COALESCE(%s, result_object_key),
+            content_type = COALESCE(%s, content_type),
+            result_content_type = COALESCE(%s, result_content_type),
+            error_message = COALESCE(%s, error_message)
+        WHERE id = %s
+        RETURNING id, name, filename, status, created_at, source_object_key, result_object_key, content_type, result_content_type, error_message
+        """,
+        (
+            payload.status,
+            payload.source_object_key,
+            payload.result_object_key,
+            payload.content_type,
+            payload.result_content_type,
+            payload.error_message,
+            job_id,
+        ),
+    )
+    if row is None:
+        return None
+    return JobData.model_validate(dict(row))
+
+
+def requeue_in_progress_jobs() -> None:
+    _execute_commit_without_return(
+        """
+        UPDATE jobs
+        SET
+            status = 'queued',
+            error_message = NULL
+        WHERE status = 'processing'
+        """
+    )
 
 
 def update_job(job_id: str, user_id: str, payload: JobUpdate) -> JobData | None:
@@ -138,14 +264,27 @@ def update_job(job_id: str, user_id: str, payload: JobUpdate) -> JobData | None:
     row = _execute_commit(
         """
         UPDATE jobs
-        SET name = %s, filename = %s, status = %s
+        SET
+            name = %s,
+            filename = %s,
+            status = %s,
+            source_object_key = %s,
+            result_object_key = %s,
+            content_type = %s,
+            result_content_type = %s,
+            error_message = %s
         WHERE id = %s AND user_id = %s
-        RETURNING id, name, filename, status, created_at
+        RETURNING id, name, filename, status, created_at, source_object_key, result_object_key, content_type, result_content_type, error_message
         """,
         (
             payload.name if payload.name is not None else current_job.name,
             payload.filename if payload.filename is not None else current_job.filename,
             payload.status if payload.status is not None else current_job.status,
+            payload.source_object_key if payload.source_object_key is not None else current_job.source_object_key,
+            payload.result_object_key if payload.result_object_key is not None else current_job.result_object_key,
+            payload.content_type if payload.content_type is not None else current_job.content_type,
+            payload.result_content_type if payload.result_content_type is not None else current_job.result_content_type,
+            payload.error_message if payload.error_message is not None else current_job.error_message,
             job_id,
             user_id,
         ),

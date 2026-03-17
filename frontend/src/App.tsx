@@ -24,6 +24,11 @@ type Job = {
   filename: string;
   status: JobStatus;
   created_at: string;
+  source_object_key: string | null;
+  result_object_key: string | null;
+  content_type: string | null;
+  result_content_type: string | null;
+  error_message: string | null;
 };
 
 type AppShellProps = {
@@ -60,6 +65,16 @@ async function readErrorMessage(response: Response) {
 
 function formatJobStatus(status: JobStatus) {
   return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+async function loadProtectedAsset(authFetch: ReturnType<typeof useAuth>["authFetch"], path: string) {
+  const response = await authFetch(path);
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+
+  const blob = await response.blob();
+  return URL.createObjectURL(blob);
 }
 
 function AuthStatusBadge() {
@@ -483,14 +498,13 @@ function CreateJobPage() {
     try {
       const createdJobs = await Promise.all(
         files.map(async (file, index) => {
+          const formData = new FormData();
+          formData.append("name", files.length > 1 ? `${trimmedName} ${index + 1}` : trimmedName);
+          formData.append("file", file);
+
           const response = await authFetch("/api/v1/jobs", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              name: files.length > 1 ? `${trimmedName} ${index + 1}` : trimmedName,
-              filename: file.name,
-              status: "queued",
-            }),
+            body: formData,
           });
 
           if (!response.ok) {
@@ -525,12 +539,12 @@ function CreateJobPage() {
         </label>
 
         <label className="field">
-          <span>Images or documents</span>
+          <span>Images</span>
           <input
             className="file-input"
             type="file"
             multiple
-            accept="image/*,.pdf"
+            accept="image/*"
             onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
             required
           />
@@ -600,6 +614,19 @@ function ResultsPage() {
   const [loading, setLoading] = useState(Boolean(initialJobId));
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(null);
+  const [sourcePreviewUrl, setSourcePreviewUrl] = useState<string | null>(null);
+  const [resultPreviewUrl, setResultPreviewUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (sourcePreviewUrl) {
+        URL.revokeObjectURL(sourcePreviewUrl);
+      }
+      if (resultPreviewUrl) {
+        URL.revokeObjectURL(resultPreviewUrl);
+      }
+    };
+  }, [resultPreviewUrl, sourcePreviewUrl]);
 
   useEffect(() => {
     if (!lookupId) {
@@ -639,6 +666,70 @@ function ResultsPage() {
 
     return () => controller.abort();
   }, [authFetch, lookupId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAssets() {
+      if (!job) {
+        setSourcePreviewUrl((current) => {
+          if (current) {
+            URL.revokeObjectURL(current);
+          }
+          return null;
+        });
+        setResultPreviewUrl((current) => {
+          if (current) {
+            URL.revokeObjectURL(current);
+          }
+          return null;
+        });
+        return;
+      }
+
+      try {
+        const sourceUrl = job.source_object_key
+          ? await loadProtectedAsset(authFetch, `/api/v1/jobs/${job.id}/source`)
+          : null;
+        const resultUrl = job.result_object_key
+          ? await loadProtectedAsset(authFetch, `/api/v1/jobs/${job.id}/result`)
+          : null;
+
+        if (cancelled) {
+          if (sourceUrl) {
+            URL.revokeObjectURL(sourceUrl);
+          }
+          if (resultUrl) {
+            URL.revokeObjectURL(resultUrl);
+          }
+          return;
+        }
+
+        setSourcePreviewUrl((current) => {
+          if (current) {
+            URL.revokeObjectURL(current);
+          }
+          return sourceUrl;
+        });
+        setResultPreviewUrl((current) => {
+          if (current) {
+            URL.revokeObjectURL(current);
+          }
+          return resultUrl;
+        });
+      } catch (assetError) {
+        if (!cancelled) {
+          setError(assetError instanceof Error ? assetError.message : "Failed to load stored images");
+        }
+      }
+    }
+
+    void loadAssets();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authFetch, job]);
 
   return (
     <AppShell title="Get results">
@@ -682,28 +773,47 @@ function ResultsPage() {
               </button>
             </div>
           ) : job ? (
-            <div className="result-grid">
-              <article className="result-card">
-                <strong>ID</strong>
-                <span>{job.id}</span>
-              </article>
-              <article className="result-card">
-                <strong>Name</strong>
-                <span>{job.name}</span>
-              </article>
-              <article className="result-card">
-                <strong>Filename</strong>
-                <span>{job.filename}</span>
-              </article>
-              <article className="result-card">
-                <strong>Status</strong>
-                <span className={`status status--${job.status}`}>{formatJobStatus(job.status)}</span>
-              </article>
-              <article className="result-card">
-                <strong>Created</strong>
-                <span>{new Date(job.created_at).toLocaleString()}</span>
-              </article>
-            </div>
+            <>
+              <div className="result-grid">
+                <article className="result-card">
+                  <strong>ID</strong>
+                  <span>{job.id}</span>
+                </article>
+                <article className="result-card">
+                  <strong>Name</strong>
+                  <span>{job.name}</span>
+                </article>
+                <article className="result-card">
+                  <strong>Filename</strong>
+                  <span>{job.filename}</span>
+                </article>
+                <article className="result-card">
+                  <strong>Status</strong>
+                  <span className={`status status--${job.status}`}>{formatJobStatus(job.status)}</span>
+                </article>
+                <article className="result-card">
+                  <strong>Created</strong>
+                  <span>{new Date(job.created_at).toLocaleString()}</span>
+                </article>
+                <article className="result-card">
+                  <strong>Storage</strong>
+                  <span>{job.result_object_key ? "Original and result stored in S3" : "Original stored in S3"}</span>
+                </article>
+              </div>
+              {job.error_message ? <p className="inline-message inline-message--error">{job.error_message}</p> : null}
+              <div className="result-grid">
+                <article className="result-card">
+                  <strong>Source image</strong>
+                  {sourcePreviewUrl ? <img className="result-preview" src={sourcePreviewUrl} alt={`Source for ${job.filename}`} /> : <span>Not available</span>}
+                  {job.source_object_key ? <a className="table-link" href={sourcePreviewUrl ?? "#"} download={job.filename}>Download source</a> : null}
+                </article>
+                <article className="result-card">
+                  <strong>Processed image</strong>
+                  {resultPreviewUrl ? <img className="result-preview" src={resultPreviewUrl} alt={`Processed result for ${job.filename}`} /> : <span>Processing has not produced a result yet.</span>}
+                  {job.result_object_key ? <a className="table-link" href={resultPreviewUrl ?? "#"} download={`processed-${job.filename}`}>Download result</a> : null}
+                </article>
+              </div>
+            </>
           ) : (
             <p className="notice-muted">No data found for this job.</p>
           )}

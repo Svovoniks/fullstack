@@ -4,14 +4,18 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 
 from app.api.routes import router as jobs_router
-from app.db import DatabaseError, get_user_by_id
+from app.db import DatabaseError, ensure_default_admin_user, ensure_schema, get_user_by_id
 from app.security import decode_access_token
+from app.storage import StorageError, get_storage
+from app.worker import JobWorker
 
 app = FastAPI(
     title="Personal Data Redaction API",
     version="0.1.0",
     description="FastAPI backend for image/document redaction workflows.",
 )
+
+job_worker = JobWorker()
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,9 +54,27 @@ def root() -> dict[str, str]:
     return {"service": "redaction-api", "status": "running"}
 
 
+@app.on_event("startup")
+def startup() -> None:
+    ensure_schema()
+    ensure_default_admin_user()
+    get_storage().ensure_bucket()
+    job_worker.start()
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    job_worker.stop()
+
+
 @app.exception_handler(DatabaseError)
 def database_error_handler(_: Request, exc: DatabaseError) -> JSONResponse:
     return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+
+@app.exception_handler(StorageError)
+def storage_error_handler(_: Request, exc: StorageError) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.exception_handler(RequestValidationError)

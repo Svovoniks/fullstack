@@ -10,3 +10,6 @@ frontend/tsconfig.tsbuildinfo
 
 # Env
 *.env
+
+# YOLO weights
+yolo-service/models/*.pt

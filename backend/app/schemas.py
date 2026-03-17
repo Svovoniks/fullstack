@@ -15,12 +15,22 @@ class JobData(BaseModel):
     filename: str
     status: JobStatus
     created_at: datetime
+    source_object_key: str | None = None
+    result_object_key: str | None = None
+    content_type: str | None = None
+    result_content_type: str | None = None
+    error_message: str | None = None
 
 
 class JobCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     filename: str = Field(min_length=1, max_length=255)
     status: JobStatus = "queued"
+    source_object_key: str | None = Field(default=None, max_length=1024)
+    result_object_key: str | None = Field(default=None, max_length=1024)
+    content_type: str | None = Field(default=None, max_length=255)
+    result_content_type: str | None = Field(default=None, max_length=255)
+    error_message: str | None = Field(default=None, max_length=1000)
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -29,12 +39,26 @@ class JobUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     filename: str | None = Field(default=None, min_length=1, max_length=255)
     status: JobStatus | None = None
+    source_object_key: str | None = Field(default=None, max_length=1024)
+    result_object_key: str | None = Field(default=None, max_length=1024)
+    content_type: str | None = Field(default=None, max_length=255)
+    result_content_type: str | None = Field(default=None, max_length=255)
+    error_message: str | None = Field(default=None, max_length=1000)
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
     @model_validator(mode="after")
     def validate_non_empty_payload(self) -> "JobUpdate":
-        if self.name is None and self.filename is None and self.status is None:
+        if (
+            self.name is None
+            and self.filename is None
+            and self.status is None
+            and self.source_object_key is None
+            and self.result_object_key is None
+            and self.content_type is None
+            and self.result_content_type is None
+            and self.error_message is None
+        ):
             raise ValueError("At least one field must be provided")
 
         return self

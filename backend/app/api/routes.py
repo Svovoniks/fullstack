@@ -1,4 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from pathlib import Path
+from urllib.parse import quote
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 
 from app.db import AuthError
 from app.db import authenticate_user
@@ -11,6 +16,7 @@ from app.db import list_jobs as fetch_jobs
 from app.db import refresh_auth_tokens
 from app.db import update_job as save_job
 from app.schemas import AuthTokens, ErrorResponse, JobCreate, JobData, JobUpdate, RefreshTokenPayload, SortBy, SortOrder, UserAuthPayload, UserData
+from app.storage import get_storage
 
 router = APIRouter()
 
@@ -108,8 +114,37 @@ def get_job(job_id: str, user: UserData = Depends(get_current_user)) -> JobData:
     responses={422: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     tags=["jobs"],
 )
-def create_job(payload: JobCreate, user: UserData = Depends(get_current_user)) -> JobData:
-    return insert_job(user.id, payload)
+async def create_job(
+    name: str = Form(..., min_length=1, max_length=120),
+    file: UploadFile = File(...),
+    user: UserData = Depends(get_current_user),
+) -> JobData:
+    if not file.filename:
+        raise HTTPException(status_code=422, detail="Uploaded file must have a name")
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Upload must be an image")
+
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty")
+
+    filename = Path(file.filename).name
+    job_id = str(uuid4())
+    source_object_key = f"{user.id}/{job_id}/source/{filename}"
+    storage = get_storage()
+
+    storage.upload_bytes(source_object_key, image_bytes, file.content_type)
+    return insert_job(
+        user.id,
+        JobCreate(
+            name=name,
+            filename=filename,
+            status="queued",
+            source_object_key=source_object_key,
+            content_type=file.content_type,
+        ),
+        job_id=job_id,
+    )
 
 
 @router.put(
@@ -138,3 +173,31 @@ def delete_job(job_id: str, user: UserData = Depends(get_current_user)) -> Respo
         raise HTTPException(status_code=404, detail="Job not found")
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/jobs/{job_id}/source", tags=["jobs"])
+def download_job_source(job_id: str, user: UserData = Depends(get_current_user)) -> StreamingResponse:
+    job = fetch_job(job_id, user.id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.source_object_key:
+        raise HTTPException(status_code=404, detail="Source image not found")
+
+    data, content_type = get_storage().download_object(job.source_object_key)
+    response = StreamingResponse(iter([data]), media_type=content_type or job.content_type or "application/octet-stream")
+    response.headers["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(job.filename)}"
+    return response
+
+
+@router.get("/jobs/{job_id}/result", tags=["jobs"])
+def download_job_result(job_id: str, user: UserData = Depends(get_current_user)) -> StreamingResponse:
+    job = fetch_job(job_id, user.id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.result_object_key:
+        raise HTTPException(status_code=409, detail="Processed image is not available yet")
+
+    data, content_type = get_storage().download_object(job.result_object_key)
+    response = StreamingResponse(iter([data]), media_type=content_type or job.result_content_type or "application/octet-stream")
+    response.headers["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(job.filename)}"
+    return response
